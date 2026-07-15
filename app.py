@@ -1,4 +1,6 @@
-import time
+from dotenv import load_dotenv
+load_dotenv()
+
 import streamlit as st
 from Components.sidebar import show_sidebar
 from Utilis.file_handler import save_uploaded_file
@@ -6,8 +8,13 @@ from Utilis import extract_text
 from Utilis.document_classifier import classify_document
 from Utilis.entity_extractor import extract_entities
 from Utilis.document_router import route_document
-from dotenv import load_dotenv
-load_dotenv()
+
+
+def fmt_entities(items, limit=10):
+    if not items:
+        return "None"
+    suffix = f" … (+{len(items) - limit} more)" if len(items) > limit else ""
+    return ", ".join(items[:limit]) + suffix
 
 
 st.set_page_config(
@@ -41,19 +48,20 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ── Auto-detect agent from uploaded file (before sidebar renders) ────────────
-detected_agent = None
-if "detected_agent" in st.session_state:
-    detected_agent = st.session_state.detected_agent
+# ── Session state defaults ────────────────────────────────────────────────────
+for _key in ("detected_agent", "results"):
+    if _key not in st.session_state:
+        st.session_state[_key] = None
 
-show_sidebar(detected_agent)
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+show_sidebar(st.session_state.detected_agent)
 
-# ── Header ──────────────────────────────────────────────────────────────────
+# ── Header ────────────────────────────────────────────────────────────────────
 st.markdown("## 🤖 Financial & Legal AI Agent")
 st.caption("Upload a document — the correct AI agent will be selected automatically.")
 st.divider()
 
-# ── Dashboard Metrics ────────────────────────────────────────────────────────
+# ── Dashboard Metrics ─────────────────────────────────────────────────────────
 metrics = [
     ("📄", "Documents Analyzed", "128", "+12 this week"),
     ("📝", "Contracts Reviewed",  "45",  "+3 this week"),
@@ -71,7 +79,7 @@ for col, (icon, label, value, delta) in zip(st.columns(4), metrics):
 
 st.divider()
 
-# ── Upload + Agent + Action ──────────────────────────────────────────────────
+# ── Upload + Agent + Action ───────────────────────────────────────────────────
 left, right = st.columns([2, 1], gap="large")
 
 with left:
@@ -86,10 +94,11 @@ with left:
 
 with right:
     st.markdown('<p class="section-header">🤖 Active Agent</p>', unsafe_allow_html=True)
-    if detected_agent:
-        st.info(f"**{detected_agent}**", icon="🧠")
+    if st.session_state.detected_agent:
+        st.info(f"**{st.session_state.detected_agent}**", icon="🧠")
     else:
         st.info("Agent will be auto-assigned after upload.", icon="🧠")
+
     st.markdown('<p class="section-header" style="margin-top:1rem">⚙️ Options</p>', unsafe_allow_html=True)
     detailed = st.toggle("Detailed Report", value=True)
     export   = st.toggle("Export Results",  value=False)
@@ -97,44 +106,74 @@ with right:
 
 st.divider()
 
-# ── Analysis Results ─────────────────────────────────────────────────────────
+# ── Run Analysis ──────────────────────────────────────────────────────────────
+if run and uploaded_file:
+    _error = None
+    with st.spinner(f"Classifying and analysing `{uploaded_file.name}`…"):
+        try:
+            filepath  = save_uploaded_file(uploaded_file)
+            extracted = extract_text(filepath)
+            doc_type  = classify_document(extracted)
+            entities  = extract_entities(extracted)
+            routed    = route_document(doc_type)
+
+            st.session_state.detected_agent = routed
+            st.session_state.results = {
+                "filename":  uploaded_file.name,
+                "extracted": extracted,
+                "doc_type":  doc_type,
+                "entities":  entities,
+                "routed":    routed,
+                "detailed":  detailed,
+                "export":    export,
+            }
+        except Exception as e:
+            _error = str(e)
+            st.session_state.results = None
+
+    # rerun outside spinner so context closes cleanly
+    if _error:
+        st.error(f"❌ Analysis failed: {_error}")
+    else:
+        st.rerun()
+
+# ── Analysis Results ──────────────────────────────────────────────────────────
 st.markdown('<p class="section-header">📊 Analysis Results</p>', unsafe_allow_html=True)
 
-if run:
-    with st.spinner(f"Classifying and analysing `{uploaded_file.name}`…"):
-        filepath  = save_uploaded_file(uploaded_file)
-        extracted = extract_text(filepath)
-        doc_type  = classify_document(extracted)
-        entities  = extract_entities(extracted)
-        routed    = route_document(doc_type)
-        st.session_state.detected_agent = routed
-        detected_agent = routed
+results = st.session_state.results
 
+if results:
     tab1, tab2, tab3 = st.tabs(["📋 Summary", "🔍 Key Findings", "⚠️ Risk Flags"])
 
     with tab1:
-        st.markdown(f"**Document:** `{uploaded_file.name}`")
-        st.markdown(f"**Detected Type:** {doc_type}")
-        st.markdown(f"**Auto-Assigned Agent:** {routed}")
-        st.markdown(f"**Mode:** {'Detailed' if detailed else 'Standard'}")
-        st.markdown(f"**Characters extracted:** {len(extracted):,}")
+        st.markdown(f"**Document:** `{results['filename']}`")
+        st.markdown(f"**Detected Type:** {results['doc_type']}")
+        st.markdown(f"**Auto-Assigned Agent:** {results['routed']}")
+        st.markdown(f"**Mode:** {'Detailed' if results['detailed'] else 'Standard'}")
+        st.markdown(f"**Characters extracted:** {len(results['extracted']):,}")
         st.progress(100, text="Analysis complete")
         st.success("Document processed successfully. Review the tabs for findings.")
         with st.expander("📄 Extracted Text Preview"):
-            st.text(extracted[:3000] + ("…" if len(extracted) > 3000 else ""))
+            preview = results["extracted"][:3000]
+            st.text(preview + ("…" if len(results["extracted"]) > 3000 else ""))
 
     with tab2:
-        st.markdown(f"**Amounts found:** {', '.join(entities['Amounts']) or 'None'}")
-        st.markdown(f"**Dates found:** {', '.join(entities['Dates']) or 'None'}")
-        st.markdown(f"**Emails found:** {', '.join(entities['Emails']) or 'None'}")
+        ents = results["entities"]
+        st.markdown(f"**Amounts found:** {fmt_entities(ents.get('Amounts', []))}")
+        st.markdown(f"**Dates found:** {fmt_entities(ents.get('Dates', []))}")
+        st.markdown(f"**Emails found:** {fmt_entities(ents.get('Emails', []))}")
 
     with tab3:
         st.warning("⚠️ High Risk — Indemnification clause is overly broad")
         st.warning("⚠️ Medium Risk — Missing force majeure provision")
         st.info("ℹ️ Low Risk — Termination notice period is 15 days (standard is 30)")
 
-    if export:
-        st.download_button("⬇️ Download Report", data=extracted, file_name=f"{uploaded_file.name}_report.txt")
+    if results.get("export"):
+        st.download_button(
+            "⬇️ Download Report",
+            data=results["extracted"],
+            file_name=f"{results['filename']}_report.txt"
+        )
 
 else:
     st.markdown("""

@@ -1,8 +1,9 @@
+import os
 from pathlib import Path
 from werkzeug.utils import secure_filename
 
-UPLOAD_FOLDER = Path("uploads")
-UPLOAD_FOLDER.mkdir(exist_ok=True)
+UPLOAD_FOLDER = Path(os.getenv("UPLOAD_FOLDER", "Uploads")).resolve()
+UPLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
 
 
 def save_uploaded_file(uploaded_file):
@@ -12,4 +13,4 @@ def save_uploaded_file(uploaded_file):
     filepath = UPLOAD_FOLDER / safe_name
     with open(filepath, "wb") as f:
         f.write(uploaded_file.getbuffer())
-    return filepath
+    return str(filepath)
