@@ -1,35 +1,27 @@
-from ai.llm import llm 
-from longchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate
+from AI.llm import llm
+from AI.prompts import LEGAL_PROMPT
+from AI.schemas import LegalAgentResponse
+from AI.Agents._base import parse_llm_json, build_risks, build_steps, write_state
 
-legal_prompt = """
-You are a senior Legal Analyst.
 
-Review the document carefully.
+def legal_agent(state: dict) -> dict:
+    chain = ChatPromptTemplate.from_template(LEGAL_PROMPT) | llm
+    raw   = chain.invoke({"context": state["context"], "question": state["question"]}).content
+    data  = parse_llm_json(raw)
 
-Context:
-{context}
-
-Question:
-{question}
-
-Provide: 
-
-## Contract Summary 
-
-## Important Clauses
-
-## Risks 
-
-## Recommendations
-"""
-
-def legal_agent(state):
-    prompt = ChatPromptTemplate.from_template(legal_prompt)
-    chain = prompt | llm
-
-    answer = chain.invoke({
-        "context": state["context"],
-        "question": state["question"]
-    })
-    state["response"] = answer.content
-    return state
+    response = LegalAgentResponse(
+        document_type        = state.get("document_type", "Contract"),
+        summary              = data.get("summary", ""),
+        key_findings         = data.get("key_findings", []),
+        parties_involved     = data.get("parties_involved", []),
+        governing_law        = data.get("governing_law"),
+        effective_date       = data.get("effective_date"),
+        termination_clauses  = data.get("termination_clauses", []),
+        risks                = build_risks(data),
+        recommendations      = data.get("recommendations", []),
+        confidence_score     = float(data.get("confidence_score", 0.5)),
+        confidence_rationale = data.get("confidence_rationale", ""),
+        reasoning_steps      = build_steps(data),
+    )
+    return write_state(state, response)

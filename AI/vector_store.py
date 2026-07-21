@@ -1,6 +1,6 @@
 from langchain_community.vectorstores import FAISS
 
-from ai.embeddings import embeddings
+from AI.embeddings import embeddings
 
 
 def build_vector_store(text):
