@@ -1,17 +1,47 @@
 import json
-
+from time import perf_counter
 import streamlit as st
 from dotenv import load_dotenv
 
-from AI.analysis import analyze_document
-from Components.sidebar import show_sidebar
-from Utilis import extract_text
-from Utilis.document_classifier import classify_document
-from Utilis.document_router import route_document
-from Utilis.entity_extractor import extract_entities
-from Utilis.file_handler import save_uploaded_file
+from services.analysis_service import analyze_document
+from services.document_service import save_uploaded_file, extract_text, classify_document, route_document, extract_entities
+from ui.sidebar import show_sidebar
+from core.database import init_database
+from services.auth_service import authenticate_user, register_user
+from services.persistence_service import add_message, create_document, delete_document, get_document_text, get_history, get_user_analytics, get_user_documents, save_analysis
+from services.report_service import generate_pdf_report
+from services.logging_service import log_event
 
 load_dotenv()
+init_database()
+
+if "user_id" not in st.session_state:
+    st.set_page_config(page_title="Aureon | Login", layout="centered")
+    st.title("Aureon Intelligence Studio")
+    st.caption("Local development access — passwords are securely hashed.")
+    login_tab, register_tab = st.tabs(["Login", "Register"])
+    with login_tab:
+        with st.form("login"):
+            email = st.text_input("Email", key="login_email")
+            password = st.text_input("Password", type="password", key="login_password")
+            if st.form_submit_button("Login"):
+                user = authenticate_user(email, password)
+                if user:
+                    st.session_state.user_id, st.session_state.user_email = user.id, user.email
+                    st.rerun()
+                st.error("Invalid email or password.")
+    with register_tab:
+        with st.form("register"):
+            email = st.text_input("Email", key="register_email")
+            password = st.text_input("Password (8+ characters)", type="password", key="register_password")
+            if st.form_submit_button("Create account"):
+                try:
+                    user = register_user(email, password)
+                    st.session_state.user_id, st.session_state.user_email = user.id, user.email
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+    st.stop()
 
 st.set_page_config(page_title="Aureon | Intelligence Studio", page_icon="✦", layout="wide", initial_sidebar_state="expanded")
 
@@ -31,6 +61,29 @@ st.markdown("""
 
 detected_agent = st.session_state.get("detected_agent")
 show_sidebar(detected_agent)
+with st.sidebar:
+    st.caption(f"Signed in as {st.session_state.user_email}")
+    if st.button("Logout", use_container_width=True):
+        for key in ("user_id", "user_email", "document_id", "document_text", "document_type", "last_result"):
+            st.session_state.pop(key, None)
+        st.rerun()
+    documents = get_user_documents(st.session_state.user_id)
+    if documents:
+        choices = {f"{item['filename']} · {item['document_type']}": item["id"] for item in documents}
+        selected = st.selectbox("Document history", ["Current document"] + list(choices), key="history_document")
+        if selected != "Current document" and st.button("Open document", use_container_width=True):
+            document_id = choices[selected]
+            saved = get_document_text(st.session_state.user_id, document_id)
+            st.session_state.document_id = document_id
+            st.session_state.document_text = saved["text"]
+            st.session_state.document_type = saved["document_type"]
+            st.success("Previous document opened. Ask a follow-up question in the workspace.")
+        if selected != "Current document" and st.button("Delete document", use_container_width=True):
+            delete_document(st.session_state.user_id, choices[selected])
+            if st.session_state.get("document_id") == choices[selected]:
+                for key in ("document_id", "document_text", "document_type", "last_result"):
+                    st.session_state.pop(key, None)
+            st.rerun()
 
 st.markdown('<div class="topline"><span>INTELLIGENCE WORKSPACE / 2026</span><span class="secure-pill">● ENCRYPTED &amp; PRIVATE</span></div>', unsafe_allow_html=True)
 st.markdown('<div class="hero"><div class="eyebrow">DOCUMENT INTELLIGENCE</div><h1>Decisions, clarified.</h1><p>Turn complex financial and legal documents into clear, defensible insight.</p></div>', unsafe_allow_html=True)
@@ -38,6 +91,17 @@ st.markdown('<div class="hero"><div class="eyebrow">DOCUMENT INTELLIGENCE</div><
 metrics = [("◈", "Documents analyzed", "128", "+12 this week"), ("◫", "Contracts reviewed", "45", "+3 this week"), ("▣", "Invoices processed", "67", "+8 this week"), ("✓", "Compliance checks", "34", "+5 this week")]
 for col, (icon, label, value, delta) in zip(st.columns(4), metrics):
     col.markdown(f'<div class="metric-card"><div class="metric-top"><div class="metric-icon">{icon}</div><div class="metric-delta">↑ {delta}</div></div><div class="metric-label">{label}</div><div class="metric-value">{value}</div></div>', unsafe_allow_html=True)
+
+with st.expander("My analytics"):
+    analytics = get_user_analytics(st.session_state.user_id)
+    a1, a2, a3, a4 = st.columns(4)
+    a1.metric("Documents", analytics["total_documents"])
+    a2.metric("Analyses", analytics["total_analyses"])
+    a3.metric("Successful", analytics["successful_analyses"])
+    a4.metric("Avg. processing", f"{analytics['average_processing_time']}s")
+    st.caption(f"Most-used specialist: {analytics['most_used_agent']} · Failed analyses: {analytics['failed_analyses']}")
+    if analytics["documents_by_type"]:
+        st.bar_chart(analytics["documents_by_type"])
 
 st.markdown('<div style="height:2rem"></div>', unsafe_allow_html=True)
 left, right = st.columns([2, 1], gap="large")
@@ -53,71 +117,87 @@ with right:
     detailed = st.toggle("Detailed report", value=True)
     export = st.toggle("Export results", value=False)
     question = st.text_input("Review focus", value="Summarize this document.")
-    run = st.button("Run analysis", type="primary", use_container_width=True, disabled=not uploaded_file)
+    run = st.button("Run analysis", type="primary", use_container_width=True, disabled=not uploaded_file and not st.session_state.get("document_text"))
     st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown('<div class="results-head"><div><div class="results-kicker">ANALYSIS CONSOLE</div><h3 style="margin:.35rem 0 0;letter-spacing:-.04em">Review findings</h3></div><div class="live-badge">● READY</div></div>', unsafe_allow_html=True)
 
 if run:
-    with st.spinner(f"Classifying and analysing {uploaded_file.name}…"):
-        filepath = save_uploaded_file(uploaded_file)
-        extracted = extract_text(filepath)
-        doc_type = classify_document(extracted)
-        entities = extract_entities(extracted)
-        routed = route_document(doc_type)
-        st.session_state.detected_agent = routed
-        result = analyze_document(text=extracted, document_type=doc_type, question=question)
+    with st.spinner("Analysing document…"):
+        started = perf_counter()
+        if uploaded_file:
+            filepath = save_uploaded_file(uploaded_file)
+            text = extract_text(filepath)
+        else:
+            text = st.session_state["document_text"]
+        classification = classify_document(text)
+        doc_type = classification.document_type
+        agent_name = route_document(doc_type)
+        st.session_state["detected_agent"] = agent_name
 
-    structured = result["structured"]
-    confidence = result["confidence_score"]
-    rationale = result["confidence_rationale"]
-    steps = result["reasoning_steps"]
-    risks = structured.get("risks", [])
-    findings = structured.get("key_findings", [])
-    recommendations = structured.get("recommendations", [])
-    validation_report = result.get("validation_report")
-    collab_agents = result.get("collaborating_agents", [])
-    agent_responses = result.get("agent_responses", [])
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Summary", "Key findings", "Risk flags", "Reasoning", "Validation"])
+        if uploaded_file:
+            document_id = create_document(st.session_state.user_id, uploaded_file.name, uploaded_file.type or "unknown", doc_type, classification.confidence, text)
+            st.session_state.document_id = document_id
+            st.session_state.document_text = text
+            st.session_state.document_type = doc_type
+        document_id = st.session_state.document_id
+        history = get_history(st.session_state.user_id, document_id)
+        add_message(st.session_state.user_id, document_id, "user", question)
+        result = analyze_document(text, doc_type, question, history)
+        add_message(st.session_state.user_id, document_id, "assistant", result["summary"])
+        save_analysis(st.session_state.user_id, document_id, result, perf_counter() - started)
+        log_event("document_processed", user_id=st.session_state.user_id, document_id=document_id, document_type=doc_type, processing_seconds=round(perf_counter() - started, 3), validation_passed=result.get("validation_passed", False))
+        st.session_state.last_result = result
+        entity_result = extract_entities(text)
+
+    tab1, tab2, tab3, tab4 = st.tabs(["Summary", "Structured", "Entities", "Validation"])
+
     with tab1:
-        st.markdown(f"**Document:** `{uploaded_file.name}`  \\n+**Detected type:** {doc_type}  \\n+**Assigned specialist:** {routed}  \\n+**Mode:** {'Detailed' if detailed else 'Standard'}")
-        color = "#22a06b" if confidence >= .75 else "#d99013" if confidence >= .5 else "#d74a49"
-        st.markdown(f"**Confidence:** <span style='color:{color};font-weight:800'>{confidence:.0%}</span>", unsafe_allow_html=True)
-        st.progress(confidence, text=rationale or "")
-        st.markdown("**Executive summary**")
-        st.markdown(result["summary"])
-        with st.expander("Extracted text preview"):
-            st.text(extracted[:3000] + ("…" if len(extracted) > 3000 else ""))
+        st.markdown(f'<div class="analysis-box"><p>{result["summary"]}</p></div>', unsafe_allow_html=True)
+        analysis_confidence = result["analysis_confidence"]
+        st.markdown(f"**AI/system confidence:** {analysis_confidence['label']} (system score {analysis_confidence['confidence'] * 100:.0f}/100)")
+        st.caption(analysis_confidence["disclaimer"])
+        if analysis_confidence["rationale"]:
+            st.caption(f"Signal basis: {analysis_confidence['rationale']}")
+        if detailed and result.get("reasoning_steps"):
+            st.markdown("**Reasoning steps**")
+            for step in result["reasoning_steps"]:
+                st.markdown(f"- **{step.get('action')}** → {step.get('observation')}")
+
     with tab2:
-        st.markdown(f"**Amounts:** {', '.join(entities['Amounts']) or 'None'}  \\n+**Dates:** {', '.join(entities['Dates']) or 'None'}  \\n+**Emails:** {', '.join(entities['Emails']) or 'None'}")
-        for item in findings: st.markdown(f"- {item}")
-        if recommendations:
-            st.markdown("**Recommendations**")
-            for item in recommendations: st.markdown(f"- {item}")
+        st.json(result["structured"])
+
     with tab3:
-        if risks:
-            for risk in risks:
-                severity, description = risk.get("severity", "LOW").upper(), risk.get("description", "")
-                label = f"{severity} — {description}"
-                (st.error if severity == "HIGH" else st.warning if severity == "MEDIUM" else st.info)(label)
-        else: st.success("No risk flags identified.")
+        st.markdown(f"**Document classification:** {classification.document_type} — {classification.confidence_label} (system score {classification.confidence * 100:.0f}/100)")
+        st.caption(classification.confidence_note)
+        st.markdown(f"**Entity extraction:** {entity_result.confidence_label} (system score {entity_result.confidence * 100:.0f}/100)")
+        st.caption(entity_result.confidence_note)
+        for label, values in entity_result.entities.items():
+            if values:
+                st.markdown(f"**{label}:** {', '.join(values)}")
+        st.markdown("**Why this classification**")
+        indicators = ", ".join(classification.matched_signals) or "No strong matching indicators"
+        st.write(f"{agent_name} selected because the document contains: {indicators}.")
+        st.markdown("**Agents and retrieved sections**")
+        st.write("Agents used: " + ", ".join(item.get("agent_name", "Specialist") for item in result.get("agent_responses", [])))
+        st.write("Retrieved: " + ", ".join(result.get("source_references", [])))
+
     with tab4:
-        for step in steps:
-            with st.expander(f"Step {step.get('step', '?')}: {step.get('action', '')}"):
-                st.markdown(step.get("observation", ""))
-        if collab_agents and detailed:
-            st.markdown("**Collaborating specialists:** " + ", ".join(collab_agents))
-            for response in agent_responses:
-                with st.expander(response.get("agent_name", "Specialist")):
-                    st.markdown(response.get("summary", ""))
-    with tab5:
-        if validation_report:
-            passed, score = validation_report.get("passed", False), validation_report.get("overall_score", 0)
-            st.success("Validation passed") if passed else st.error("Validation needs review")
-            st.progress(score, text=f"Overall quality score: {score:.0%}")
-            for check in validation_report.get("checks", []): st.markdown(f"{'✓' if check.get('passed') else '×'} **{check.get('check_name', '').replace('_', ' ').title()}** — {check.get('detail', '')}")
-        else: st.info("Validation report not available.")
+        report = result.get("validation_report") or {}
+        passed = result.get("validation_passed", True)
+        st.success("Validation passed ✓") if passed else st.error("Validation failed ✗")
+        if report.get("checks"):
+            for check in report["checks"]:
+                icon = "✅" if check["passed"] else "❌"
+                st.markdown(f"{icon} **{check['check_name']}** — {check['detail']}")
+
     if export:
-        st.download_button("Download report (JSON)", data=json.dumps(result, indent=2), file_name=f"{uploaded_file.name}_report.json", mime="application/json")
+        st.download_button("Download JSON", data=json.dumps(result, indent=2), file_name="analysis.json", mime="application/json")
+    document_info = {"filename": getattr(uploaded_file, "name", "Previous document"), "document_type": doc_type, "classification_label": classification.confidence_label}
+    try:
+        pdf_report = generate_pdf_report(document_info, result)
+        st.download_button("Generate PDF Report", data=pdf_report, file_name="aureon_report.pdf", mime="application/pdf")
+    except RuntimeError as exc:
+        st.info(str(exc))
 else:
-    st.markdown('<div class="analysis-box" style="display:flex;flex-direction:column;align-items:center;justify-content:center;"><div class="empty-symbol">✦</div><div style="font-size:1.05rem;color:#fff;font-weight:700;margin-top:1rem">Your analysis will appear here</div><div style="font-size:.8rem;margin-top:.4rem">Add a document, set your review focus, and run the analysis.</div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="analysis-box" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1rem"><div class="empty-symbol">✦</div><p style="margin:0;font-size:.88rem">Upload a document and click <b>Run analysis</b> to begin.</p></div>', unsafe_allow_html=True)

@@ -1,0 +1,3 @@
+router OK: ['financial', 'legal', 'invoice', 'tax', 'compliance']
+classifier OK: Invoice 0.75 ['Invoice keyword', 'Invoice number', 'Due date', 'VAT', 'Subtotal', 'Total amount']
+ClassificationResult OK: High Confidence
