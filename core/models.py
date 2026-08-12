@@ -36,6 +36,8 @@ class AgentState(TypedDict):
 
     # Collaboration
     agent_responses: List[Dict[str, Any]]
+    agent_runs: List[Dict[str, Any]]          # execution metadata per agent
+    conversation_history: List[Dict[str, Any]]
 
     # Validation
     validation_passed: bool

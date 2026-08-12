@@ -3,23 +3,9 @@ import statistics
 from core.models import CollaborationResult, RiskItem
 
 
-def _agent_map():
-    from Agents.financial_agent import financial_agent
-    from Agents.legal_agent import legal_agent
-    from Agents.invoice_agent import invoice_agent
-    from Agents.tax_agent import tax_agent
-    from Agents.compliance_agent import compliance_agent
-    return {
-        "financial":  financial_agent,
-        "legal":      legal_agent,
-        "invoice":    invoice_agent,
-        "tax":        tax_agent,
-        "compliance": compliance_agent,
-    }
-
-
 def _merge_risks(responses: list[dict]) -> list[RiskItem]:
-    seen, merged = set(), []
+    seen: set[tuple] = set()
+    merged: list[RiskItem] = []
     for r in responses:
         for risk in r.get("risks", []):
             if not isinstance(risk, dict):
@@ -31,36 +17,54 @@ def _merge_risks(responses: list[dict]) -> list[RiskItem]:
     return merged
 
 
-def _merge_list(responses: list[dict], field: str) -> list[str]:
-    seen, merged = set(), []
+def _merge_list(responses: list[dict], *fields: str) -> list[str]:
+    seen: set[str] = set()
+    merged: list[str] = []
     for r in responses:
-        for item in r.get(field, []):
-            if item not in seen:
-                seen.add(item)
-                merged.append(item)
+        for field in fields:
+            for item in r.get(field, []):
+                if isinstance(item, str) and item not in seen:
+                    seen.add(item)
+                    merged.append(item)
     return merged
 
 
 def collaborator_agent(state: dict) -> dict:
-    if not state.get("agent_responses"):
+    all_responses: list[dict] = state.get("agent_responses") or []
+    if not all_responses:
         return state
-    collab_keys = state.get("collaborating_agents", [])
-    all_responses = state["agent_responses"]
-    primary_response = state.get("structured_response") or all_responses[0]
 
+    primary_response = state.get("structured_response") or all_responses[0]
     merged_risks = _merge_risks(all_responses)
     merged_recs = _merge_list(all_responses, "recommendations")
-    merged_findings = _merge_list(all_responses, "financial_highlights") or _merge_list(all_responses, "important_clauses")
-    scores = [r.get("confidence", r.get("confidence_score", 0.5)) for r in all_responses if r]
+    # Collect highlights from whichever field each agent populates
+    merged_highlights = _merge_list(all_responses, "financial_highlights", "required_actions")
+
+    scores = [
+        r.get("confidence", r.get("confidence_score", 0.5))
+        for r in all_responses if r
+    ]
     overall_confidence = round(statistics.mean(scores), 4) if scores else 0.5
+
+    # Per-agent summary breakdown for UI display
+    agent_breakdown = [
+        {
+            "agent_name":  r.get("agent_name", "Agent"),
+            "summary":     r.get("summary", ""),
+            "confidence":  r.get("confidence", r.get("confidence_score", 0.0)),
+            "risk_count":  len(r.get("risks", [])),
+        }
+        for r in all_responses
+    ]
+
     merged_summary = "\n\n".join(
-        f"{r.get('agent_name', 'Agent')}: {r.get('summary', '')}"
+        f"**{r.get('agent_name', 'Agent')}**: {r.get('summary', '')}"
         for r in all_responses if r.get("summary")
     )
 
     result = CollaborationResult(
         primary_agent=primary_response.get("agent_name", state.get("selected_agent", "")),
-        collaborating_agents=collab_keys,
+        collaborating_agents=state.get("collaborating_agents", []),
         merged_summary=merged_summary,
         merged_risks=merged_risks,
         merged_recommendations=merged_recs,
@@ -70,9 +74,12 @@ def collaborator_agent(state: dict) -> dict:
 
     state["structured_response"] = {
         **(state.get("structured_response") or {}),
-        "collaboration": result.model_dump(),
-        "financial_highlights": merged_findings,
-        "risks": [r.model_dump() for r in merged_risks],
+        "collaboration": {
+            **result.model_dump(),
+            "agent_breakdown": agent_breakdown,
+        },
+        "financial_highlights": merged_highlights,
+        "risks":           [r.model_dump() for r in merged_risks],
         "recommendations": merged_recs,
     }
     state["response"] = merged_summary

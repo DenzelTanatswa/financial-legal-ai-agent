@@ -49,6 +49,7 @@ def analyze_document(text: str, document_type: str, question: str, conversation_
         "confidence_rationale": "",
         "reasoning_steps": [],
         "agent_responses": [],
+        "agent_runs": [],
         "validation_passed": True,
         "validation_report": None,
         "collaborating_agents": [],

@@ -3,6 +3,32 @@ from time import perf_counter
 import streamlit as st
 from dotenv import load_dotenv
 
+
+def _confidence_badge(label: str, score: float, rationale: str = "", disclaimer: str = "") -> None:
+    colour = {
+        "High Confidence":   ("#0d6e4f", "#d1fae5", "#6ee7b7"),
+        "Medium Confidence": ("#92400e", "#fef3c7", "#fcd34d"),
+        "Low Confidence":    ("#991b1b", "#fee2e2", "#fca5a5"),
+    }.get(label, ("#374151", "#f3f4f6", "#9ca3af"))
+    text_c, bg_c, border_c = colour
+    pct = int(score * 100)
+    st.markdown(
+        f'<div style="display:inline-flex;align-items:center;gap:8px;background:{bg_c};'
+        f'border:1px solid {border_c};border-radius:999px;padding:5px 12px;margin:4px 0">'
+        f'<span style="width:8px;height:8px;border-radius:50%;background:{text_c};display:inline-block"></span>'
+        f'<span style="color:{text_c};font-weight:700;font-size:.78rem">{label}</span>'
+        f'<span style="color:{text_c};font-size:.72rem;opacity:.75">({pct}/100)</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+    if rationale:
+        st.caption(f"ℹ️ {rationale}")
+    note = disclaimer or (
+        "This is an AI/system confidence score based on available signals — "
+        "not a calibrated probability of correctness."
+    )
+    st.caption(f"⚠️ {note}")
+
 from services.analysis_service import analyze_document
 from services.document_service import save_uploaded_file, extract_text, classify_document, route_document, extract_entities
 from ui.sidebar import show_sidebar
@@ -150,28 +176,123 @@ if run:
         st.session_state.last_result = result
         entity_result = extract_entities(text)
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Summary", "Structured", "Entities", "Validation"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Summary", "Financials", "Structured", "Entities", "Validation"])
+    s = result["structured"]
 
     with tab1:
         st.markdown(f'<div class="analysis-box"><p>{result["summary"]}</p></div>', unsafe_allow_html=True)
-        analysis_confidence = result["analysis_confidence"]
-        st.markdown(f"**AI/system confidence:** {analysis_confidence['label']} (system score {analysis_confidence['confidence'] * 100:.0f}/100)")
-        st.caption(analysis_confidence["disclaimer"])
-        if analysis_confidence["rationale"]:
-            st.caption(f"Signal basis: {analysis_confidence['rationale']}")
+        if result.get("analysis_confidence"):
+            ac = result["analysis_confidence"]
+            st.markdown("**AI Analysis Confidence**")
+            _confidence_badge(
+                ac["label"],
+                ac["confidence"],
+                rationale=ac.get("rationale", ""),
+                disclaimer=ac.get("disclaimer", ""),
+            )
+        risks = s.get("risks") or []
+        if risks:
+            st.markdown("**Risks**")
+            for r in risks:
+                colour = {"HIGH": "🔴", "MEDIUM": "🟡", "LOW": "🟢"}.get(r.get("severity", "").upper(), "⚪")
+                st.markdown(f"{colour} **{r.get('severity')}** — {r.get('description')}")
+        recs = s.get("recommendations") or []
+        if recs:
+            st.markdown("**Recommendations**")
+            for rec in recs:
+                st.markdown(f"- {rec}")
+        collab = s.get("collaboration") or {}
+        breakdown = collab.get("agent_breakdown") or []
+        if len(breakdown) > 1:
+            st.markdown("**Agent collaboration**")
+            cols = st.columns(len(breakdown))
+            for col, agent in zip(cols, breakdown):
+                conf = agent.get("confidence", 0.0)
+                from core.models import confidence_label
+                label = confidence_label(conf)
+                col.metric(
+                    agent.get("agent_name", "Agent"),
+                    f"{int(conf * 100)}/100",
+                    delta=label,
+                )
+                col.caption(agent.get("summary", "")[:120] + ("…" if len(agent.get("summary", "")) > 120 else ""))
+        agent_runs = result.get("agent_runs") or []
+        if agent_runs:
+            with st.expander(f"Execution details ({len(agent_runs)} agent{'s' if len(agent_runs) != 1 else ''} ran)"):
+                for run in agent_runs:
+                    st.markdown(f"- **{run.get('agent_name', run.get('agent'))}** — {run.get('execution_seconds', 0):.2f}s · {run.get('status', '')}")
         if detailed and result.get("reasoning_steps"):
-            st.markdown("**Reasoning steps**")
-            for step in result["reasoning_steps"]:
-                st.markdown(f"- **{step.get('action')}** → {step.get('observation')}")
+            with st.expander("Reasoning steps"):
+                for step in result["reasoning_steps"]:
+                    st.markdown(f"**{step.get('action')}** → {step.get('observation')}")
 
     with tab2:
-        st.json(result["structured"])
+        import pandas as pd
+        currency = s.get("currency", "")
+        numeric_fields = [
+            ("total_income",     "Total Income"),
+            ("total_expenses",   "Total Expenses"),
+            ("net_cashflow",     "Net Cash Flow"),
+            ("subtotal",         "Subtotal"),
+            ("tax_amount",       "Tax Amount"),
+            ("total",            "Total"),
+            ("tax_liability",    "Tax Liability"),
+            ("total_deductions", "Total Deductions"),
+            ("taxable_income",   "Taxable Income"),
+        ]
+        rendered = [(label, s[key]) for key, label in numeric_fields if s.get(key) is not None]
+        if rendered:
+            cols = st.columns(min(len(rendered), 3))
+            for i, (label, val) in enumerate(rendered):
+                cols[i % 3].metric(label, f"{currency} {val:,.2f}")
+        else:
+            st.info("No numeric figures extracted for this document type.")
+        breakdown = s.get("cashflow_breakdown") or []
+        if breakdown:
+            st.markdown("**Cash Flow Breakdown**")
+            for item in breakdown:
+                st.markdown(f"- **{item.get('label')}**: {item.get('currency', '')} {item.get('amount', 0):,.2f}")
+        line_items = s.get("line_items") or []
+        if line_items:
+            st.markdown("**Line Items**")
+            st.dataframe(pd.DataFrame(line_items), use_container_width=True)
+        parties = s.get("parties") or []
+        if parties:
+            st.markdown("**Parties**")
+            for p in parties:
+                st.markdown(f"- **{p.get('name')}** — {p.get('role', 'N/A')}")
+        clauses = s.get("important_clauses") or []
+        if clauses:
+            st.markdown("**Important Clauses**")
+            for c in clauses:
+                with st.expander(c.get("title", "Clause")):
+                    st.write(c.get("summary", ""))
+                    if c.get("clause_reference"):
+                        st.caption(f"Ref: {c['clause_reference']}")
+        highlights = s.get("financial_highlights") or []
+        if highlights:
+            st.markdown("**Highlights**")
+            for h in highlights:
+                st.markdown(f"- {h}")
 
     with tab3:
-        st.markdown(f"**Document classification:** {classification.document_type} — {classification.confidence_label} (system score {classification.confidence * 100:.0f}/100)")
-        st.caption(classification.confidence_note)
-        st.markdown(f"**Entity extraction:** {entity_result.confidence_label} (system score {entity_result.confidence * 100:.0f}/100)")
-        st.caption(entity_result.confidence_note)
+        st.json(s)
+
+    with tab4:
+        st.markdown(f"**Document classification:** `{classification.document_type}`")
+        _confidence_badge(
+            classification.confidence_label,
+            classification.confidence,
+            rationale=f"Matched signals: {', '.join(classification.matched_signals) or 'none'}",
+            disclaimer=classification.confidence_note,
+        )
+        st.markdown("**Entity extraction**")
+        _confidence_badge(
+            entity_result.confidence_label,
+            entity_result.confidence,
+            rationale=f"Populated entity types: {', '.join(entity_result.matched_entity_types) or 'none'}",
+            disclaimer=entity_result.confidence_note,
+        )
         for label, values in entity_result.entities.items():
             if values:
                 st.markdown(f"**{label}:** {', '.join(values)}")
@@ -182,10 +303,11 @@ if run:
         st.write("Agents used: " + ", ".join(item.get("agent_name", "Specialist") for item in result.get("agent_responses", [])))
         st.write("Retrieved: " + ", ".join(result.get("source_references", [])))
 
-    with tab4:
+    with tab5:
         report = result.get("validation_report") or {}
         passed = result.get("validation_passed", True)
-        st.success("Validation passed ✓") if passed else st.error("Validation failed ✗")
+        score = report.get("overall_score", 0.0)
+        st.success(f"Validation passed ✓  (score: {score:.0%})") if passed else st.error(f"Validation failed ✗  (score: {score:.0%})")
         if report.get("checks"):
             for check in report["checks"]:
                 icon = "✅" if check["passed"] else "❌"
